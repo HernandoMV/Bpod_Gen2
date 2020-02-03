@@ -1,8 +1,8 @@
 %{
 ----------------------------------------------------------------------------
 
-This file is part of the Bpod Project
-Copyright (C) 2016 Joshua I. Sanders, Sanworks LLC
+This file is part of the Sanworks Bpod repository
+Copyright (C) 2019 Sanworks LLC, Stony Brook, New York, USA
 
 ----------------------------------------------------------------------------
 
@@ -17,13 +17,15 @@ See the GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %}
+function PsychToolboxSoundServer(Function, varargin)
+% NOTE: This version of PsychToolboxSoundServer is deprecated, but provided
+% for compatability with old behavior protocols. New protocols should use
+% the PsychToolboxAudio class.
 
-% This version of PsychToolboxSoundServer is modified to accept up to 4
-% channels of sound data (a 4xN array), to control 4 separate speakers. 
-function PsychToolboxSoundServer4Ch(Function, varargin)
 global BpodSystem
 SF = 192000; % Sound card sampling rate
 nSlaves = 32;
+nOutputChannels = 4;
 Function = lower(Function);
 switch Function
     case 'init'
@@ -44,50 +46,79 @@ switch Function
             AudioDevices = PsychPortAudio('GetDevices');
             nDevices = length(AudioDevices);
             CandidateDevices = []; nCandidates = 0;
+            isWASAPI = zeros(1,100);
+            isFENIX = zeros(1,100);
+            isWASAPIWinXonar = zeros(1,100);
+            BpodSystem.PluginObjects.SoundServerType = 0;
             if ispc
                 for x = 1:nDevices
-                    if strcmp(AudioDevices(x).HostAudioAPIName, 'ASIO')
-                        if AudioDevices(x).NrOutputChannels == 8
-                            nCandidates = nCandidates + 1;
-                            CandidateDevices(nCandidates) = AudioDevices(x).DeviceIndex;
+                    if isempty(strfind(AudioDevices(x).DeviceName, 'SPDIF'))
+                        if strcmp(AudioDevices(x).HostAudioAPIName, 'ASIO')
+                            if AudioDevices(x).NrOutputChannels > 3
+                                nCandidates = nCandidates + 1;
+                                CandidateDevices(nCandidates) = AudioDevices(x).DeviceIndex;
+                                if ~isempty(strfind(AudioDevices(x).DeviceName, 'FENIX'))
+                                    isFENIX(nCandidates) = 1;
+                                end
+                            end
+                        elseif strcmp(AudioDevices(x).HostAudioAPIName, 'Windows WASAPI')
+                            if AudioDevices(x).NrOutputChannels > 3
+                                nCandidates = nCandidates + 1;
+                                CandidateDevices(nCandidates) = AudioDevices(x).DeviceIndex;
+                                isWASAPI(nCandidates) = 1;
+                                if ~isempty(strfind(AudioDevices(x).DeviceName, 'XONAR'))
+                                    isWASAPIWinXonar(nCandidates) = 1;
+                                end
+                                if ~isempty(strfind(AudioDevices(x).DeviceName, 'FENIX'))
+                                    isFENIX(nCandidates) = 1;
+                                end
+                            end
                         end
                     end
                 end
             elseif ismac
+                error('Error: PsychToolboxSoundServer does not work on OS X.')
             else
                 for x = 1:nDevices
                     DeviceName = AudioDevices(x).DeviceName;
-                    if ~isempty(strfind(DeviceName, 'Xonar DX: Multichannel')) || ~isempty(strfind(DeviceName, 'Xonar U7: USB Audio')) % Assumes ASUS Xonar DX or U7 Soundcard
-                        if AudioDevices(x).NrOutputChannels == 8
+                    if sum(strcmpi(DeviceName(1:4), {'ASIO', 'XONA', 'ASUS'})) > 0 % Assumes ASUS Xonar series or other Asio Soundcard
+                        if AudioDevices(x).NrOutputChannels > 3
                             nCandidates = nCandidates + 1;
                             CandidateDevices(nCandidates) = AudioDevices(x).DeviceIndex;
                         end
                     end
                 end
             end
-            
+            isWASAPI = isWASAPI(1:nCandidates);
             if nCandidates > 0
                 for x = 1:nCandidates
                     disp(['Candidate device found! Trying candidate ' num2str(x) ' of ' num2str(nCandidates)])
+                    if isWASAPIWinXonar(x)
+                        bufferSize = SF/100;
+                    else
+                        bufferSize = 32;
+                    end
                     try
-                        CandidateDevice = PsychPortAudio('Open', CandidateDevices(x), 9, 4, SF, 6 , 32);
+                        CandidateDevice = PsychPortAudio('Open', CandidateDevices(x), 9, 4, SF, nOutputChannels, bufferSize);
                         BpodSystem.SystemSettings.SoundDeviceID = CandidateDevices(x);
-                        SaveBpodSystemSettings;
+                        if isFENIX(x) == 1
+                            BpodSystem.PluginObjects.SoundServerType = 1;
+                        end
                         PsychPortAudio('Close', CandidateDevice);
                         disp('Success! A compatible sound card was detected and stored in Bpod settings.')
                     catch
-                        
+                        disp('ERROR!')
                     end
                 end
             else
-                disp('Error: no compatible sound subsystem detected. On Windows, ensure ASIO drivers are installed.')
+                disp('Error: no compatible sound subsystem detected.')
             end
-            BpodSystem.PluginObjects.SoundServer.MasterOutput = PsychPortAudio('Open', BpodSystem.SystemSettings.SoundDeviceID, 9, 4, SF, 6 , 32);
+            BpodSystem.PluginObjects.SoundServer.MasterOutput = PsychPortAudio('Open', BpodSystem.SystemSettings.SoundDeviceID, 9, 4, SF, nOutputChannels , bufferSize);
             PsychPortAudio('Start', BpodSystem.PluginObjects.SoundServer.MasterOutput, 0, 0, 1);
             for x = 1:nSlaves
                 BpodSystem.PluginObjects.SoundServer.SlaveOutput(x) = PsychPortAudio('OpenSlave', BpodSystem.PluginObjects.SoundServer.MasterOutput);
             end
-            Data = zeros(6,192);
+            Data = zeros(nOutputChannels,192);
             PsychPortAudio('FillBuffer', BpodSystem.PluginObjects.SoundServer.SlaveOutput(1), Data);
             PsychPortAudio('Start', BpodSystem.PluginObjects.SoundServer.SlaveOutput(1));
             disp('PsychToolbox sound server successfully initialized.')
@@ -126,18 +157,25 @@ switch Function
             error('Sound data must be a row vector');
         end
         if BpodSystem.EmulatorMode == 0
-            switch Siz(1)
-                case 1 % If mono, send the same signal on all 4 channels
-                    Data(2:4,:) = Data;
-                case 2 % If stereo, duplicate the first 2 channels on Ch3-4
-                    Data(3:4,:) = Data;
+            if nOutputChannels > 2
+                if BpodSystem.PluginObjects.SoundServerType == 1
+                    Data = Data*0.75; % Avoid saturation on Fenix
+                end
+                if Siz(1) == 1 % If mono, send the same signal on both channels
+                    Data(2,:) = Data;
+                end
+                Data(3:nOutputChannels,:) = zeros(nOutputChannels-2,Siz(2));
+                Data(3:nOutputChannels,1:(SF/1000)) = ones(nOutputChannels-2,(SF/1000));
+                PsychPortAudio('FillBuffer', BpodSystem.PluginObjects.SoundServer.SlaveOutput(SlaveID), Data);
+            else
+                if Siz(1) == 1
+                    Data(2,:) = zeros(1,Siz(2));
+                    Data(2,1:(SF/1000)) = 1;
+                else
+                    error('Error: On a 2-channel sound card, only a single audio channel may be loaded. The second channel is reserved for the sync signal.')
+                end
             end
-            Data(5:6,:) = zeros(2,Siz(2));
-            Data(5:6,1:(SF/1000)) = ones(2,(SF/1000));
-            PsychPortAudio('FillBuffer', BpodSystem.PluginObjects.SoundServer.SlaveOutput(SlaveID), Data);
         else
-            % Note: This code will fail in emulator mode because MATLAB's sound function does not
-            % support more than 2 channels.
             if Siz(1) == 1 % If mono, send the same signal on both channels
                 R = rem(length(Data), 4); % Trim for down-sampling
                 if R > 0
@@ -170,6 +208,10 @@ switch Function
             if BpodSystem.EmulatorMode == 0
                 PsychPortAudio('Start', BpodSystem.PluginObjects.SoundServer.SlaveOutput(SlaveID));
             else
+                l = size(BpodSystem.PluginObjects.SoundServer.Sounds{SlaveID},1);
+                if l == 2
+                    BpodSystem.PluginObjects.SoundServer.Sounds{SlaveID} = BpodSystem.PluginObjects.SoundServer.Sounds{SlaveID}';
+                end
                 sound(BpodSystem.PluginObjects.SoundServer.Sounds{SlaveID}, 48000);
             end
         else
